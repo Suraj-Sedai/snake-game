@@ -1,15 +1,12 @@
-#!/usr/bin/env python3
-"""
-Snake Game - Backup Demo Version
-Simple, reliable implementation for workshop demos
-"""
-
 import pygame
 import random
 import sys
+import math
+import array
 
-# Initialize Pygame
+# Initialize Pygame and Mixer
 pygame.init()
+pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
 
 # Constants
 WINDOW_WIDTH = 600
@@ -19,42 +16,106 @@ GRID_WIDTH = WINDOW_WIDTH // GRID_SIZE
 GRID_HEIGHT = WINDOW_HEIGHT // GRID_SIZE
 
 # Colors
-BLACK = (15, 15, 20)
-WHITE = (230, 230, 240)
-GREEN = (46, 204, 113)   # Emerald
-DARK_GREEN = (39, 174, 96) # Nephritis
-RED = (231, 76, 60)      # Alizarin
-ORANGE = (230, 126, 34)  # Carrot
-YELLOW = (241, 196, 15)  # Sun Flower
-PINK = (255, 105, 180)
-PURPLE = (155, 89, 182)  # Amethyst
-CYAN = (52, 152, 219)    # Peter River (Super)
-BLUE = (41, 128, 185)    # Belize Hole (Slower)
-GRID_COLOR = (25, 25, 35)
+BLACK = (10, 12, 15)
+WHITE = (240, 245, 250)
+SNAKE_GREEN = (46, 204, 113)
+SNAKE_DARK = (30, 130, 70)
+TONGUE_RED = (231, 76, 60)
+RED = (255, 50, 50)
+ORANGE = (255, 150, 0)
+YELLOW = (255, 230, 0)
+PINK = (255, 100, 200)
+PURPLE = (160, 80, 255)
+CYAN = (0, 230, 255)
+BLUE = (50, 150, 255)
+GRID_COLOR = (20, 25, 30)
 
 FOOD_COLORS = [RED, ORANGE, YELLOW, PINK, PURPLE]
 SUPER_FOOD_COLOR = CYAN
-SLOWER_FOOD_COLOR = (100, 200, 255) # Bright Ice Blue
+SLOWER_FOOD_COLOR = BLUE
 
-# Timings (in milliseconds)
+# Timings
 NORMAL_FOOD_TTL = 15000 
 SUPER_FOOD_TTL = 5000
 SLOWER_FOOD_TTL = 10000
-SUPER_FOOD_CHANCE = 0.10
-SLOWER_FOOD_CHANCE = 0.15
+SUPER_FOOD_CHANCE = 0.12
+SLOWER_FOOD_CHANCE = 0.18
+
+def generate_sound(freq, duration, type='sine'):
+    """Generate a simple synthetic sound buffer"""
+    sample_rate = 22050
+    n_samples = int(sample_rate * duration)
+    buf = array.array('h', [0] * n_samples)
+    for i in range(n_samples):
+        t = float(i) / sample_rate
+        if type == 'sine':
+            val = math.sin(2.0 * math.pi * freq * t)
+        elif type == 'square':
+            val = 1.0 if math.sin(2.0 * math.pi * freq * t) > 0 else -1.0
+        else: # noise/crunch
+            val = random.uniform(-1, 1)
+        
+        # Envelope to prevent clicking
+        if i < 100: val *= (i / 100.0)
+        if i > n_samples - 100: val *= ((n_samples - i) / 100.0)
+            
+        buf[i] = int(val * 32767 * 0.5)
+    return pygame.mixer.Sound(buf)
+
+def generate_slurp_sound(duration=0.15, freq_start=1200, freq_end=300, is_super=False):
+    """Generate a 'shucck' or 'slurp' organic swallowing sound"""
+    sample_rate = 22050
+    n_samples = int(sample_rate * duration)
+    buf = array.array('h', [0] * n_samples)
+    
+    for i in range(n_samples):
+        t = float(i) / sample_rate
+        progress = i / n_samples
+        freq = freq_start - (progress * (freq_start - freq_end))
+        
+        # Combine a sine wave with noise for 'wet' texture
+        val = math.sin(2.0 * math.pi * freq * t) * 0.5
+        val += random.uniform(-0.15, 0.15) 
+        
+        if is_super:
+            val += math.sin(4.0 * math.pi * freq * t) * 0.2
+        
+        # 'Shucck' envelope: Sharp onset, quick curved decay
+        envelope = (1.0 - progress)**2 
+        if i < 200: envelope *= (i / 200.0) 
+        
+        buf[i] = int(val * envelope * 32767 * 0.8)
+    return pygame.mixer.Sound(buf)
+
+class Particle:
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+        self.color = color
+        self.vx = random.uniform(-3, 3)
+        self.vy = random.uniform(-3, 3)
+        self.lifetime = 1.0
+        self.size = random.randint(2, 5)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.lifetime -= 0.05
+        return self.lifetime > 0
 
 class SnakeGame:
     def __init__(self):
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        pygame.display.set_caption("Snake Game - Ultra Edition")
+        pygame.display.set_caption("Snake: Reptile Edition")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 36)
-        self.small_font = pygame.font.Font(None, 24)
+        
+        # Load enhanced organic sounds (the 'shucck' slurp)
+        self.snd_eat = generate_slurp_sound(0.12, 1000, 300)
+        self.snd_super = generate_slurp_sound(0.25, 1500, 200, is_super=True)
+        self.snd_die = generate_sound(100, 0.5, 'noise') # Deep crunch/thud
         
         self.base_speed = 12
-        self.speed_multiplier = 1.0
-        self.slow_effect_until = 0
-        
         self.reset_game()
     
     def reset_game(self):
@@ -64,46 +125,36 @@ class SnakeGame:
         self.game_over = False
         self.speed_multiplier = 1.0
         self.slow_effect_until = 0
+        self.particles = []
+        self.shake_amount = 0
+        self.frame_count = 0
         
         self.foods = []
         for _ in range(3):
             self.spawn_food()
     
     def spawn_food(self):
-        """Spawn a food item: Normal, Super, or Slower"""
         max_attempts = 100
         for _ in range(max_attempts):
             x = random.randint(0, GRID_WIDTH - 1)
             y = random.randint(0, GRID_HEIGHT - 1)
-            
             if (x, y) not in self.snake and not any((x, y) == food['pos'] for food in self.foods):
                 rand = random.random()
                 if rand < SUPER_FOOD_CHANCE:
-                    f_type = 'super'
-                    color = SUPER_FOOD_COLOR
-                    ttl = SUPER_FOOD_TTL
+                    f_type, color, ttl = 'super', SUPER_FOOD_COLOR, SUPER_FOOD_TTL
                 elif rand < SUPER_FOOD_CHANCE + SLOWER_FOOD_CHANCE:
-                    f_type = 'slower'
-                    color = SLOWER_FOOD_COLOR
-                    ttl = SLOWER_FOOD_TTL
+                    f_type, color, ttl = 'slower', SLOWER_FOOD_COLOR, SLOWER_FOOD_TTL
                 else:
-                    f_type = 'normal'
-                    color = random.choice(FOOD_COLORS)
-                    ttl = NORMAL_FOOD_TTL
+                    f_type, color, ttl = 'normal', random.choice(FOOD_COLORS), NORMAL_FOOD_TTL
                 
                 self.foods.append({
-                    'pos': (x, y),
-                    'color': color,
-                    'type': f_type,
+                    'pos': (x, y), 'color': color, 'type': f_type,
                     'expires_at': pygame.time.get_ticks() + ttl
                 })
                 break
     
     def handle_input(self):
-        """Handle WASD key input with prevention of 180-degree turns"""
         keys = pygame.key.get_pressed()
-        
-        # WASD controls - check if not moving in opposite direction
         if (keys[pygame.K_w] or keys[pygame.K_UP]) and self.direction != (0, 1):
             self.direction = (0, -1)
         elif (keys[pygame.K_s] or keys[pygame.K_DOWN]) and self.direction != (0, -1):
@@ -114,56 +165,62 @@ class SnakeGame:
             self.direction = (1, 0)
     
     def update(self):
-        """Update game state"""
         if self.game_over:
             return
         
+        self.frame_count += 1
         current_time = pygame.time.get_ticks()
         
-        # Check slow effect expiration
+        # Shake decay
+        if self.shake_amount > 0:
+            self.shake_amount -= 1
+            
+        # Particles
+        self.particles = [p for p in self.particles if p.update()]
+        
         if current_time > self.slow_effect_until:
             self.speed_multiplier = 1.0
         
-        # Check for expired food
-        expired_indices = []
-        for i, food in enumerate(self.foods):
-            if current_time >= food['expires_at']:
-                expired_indices.append(i)
-        
+        # Food expiration
+        expired_indices = [i for i, f in enumerate(self.foods) if current_time >= f['expires_at']]
         for i in reversed(expired_indices):
             self.foods.pop(i)
             self.spawn_food()
 
-        # Move snake
         head_x, head_y = self.snake[0]
         new_head = (head_x + self.direction[0], head_y + self.direction[1])
         
-        # Check wall collision
+        # Collisions
         if (new_head[0] < 0 or new_head[0] >= GRID_WIDTH or 
-            new_head[1] < 0 or new_head[1] >= GRID_HEIGHT):
+            new_head[1] < 0 or new_head[1] >= GRID_HEIGHT or new_head in self.snake):
             self.game_over = True
+            self.shake_amount = 10
+            self.snd_die.play()
             return
         
-        # Check self collision
-        if new_head in self.snake:
-            self.game_over = True
-            return
-        
-        # Add new head
         self.snake.insert(0, new_head)
         
-        # Check food collision
         food_eaten = False
         for i, food in enumerate(self.foods):
-            if new_head[0] == food['pos'][0] and new_head[1] == food['pos'][1]:
+            if new_head == food['pos']:
+                # Score and Sound
                 if food['type'] == 'super':
                     self.score += 50
+                    self.snd_super.play()
                 elif food['type'] == 'slower':
                     self.score += 20
-                    self.speed_multiplier = 0.6  # 40% slower
-                    self.slow_effect_until = current_time + 7000 # 7 seconds slow
+                    self.speed_multiplier = 0.6
+                    self.slow_effect_until = current_time + 7000
+                    self.snd_eat.play()
                 else:
                     self.score += 10
+                    self.snd_eat.play()
+                
+                # Burst particles
+                for _ in range(15):
+                    px = food['pos'][0] * GRID_SIZE + GRID_SIZE//2
+                    py = food['pos'][1] * GRID_SIZE + GRID_SIZE//2
+                    self.particles.append(Particle(px, py, food['color']))
                 
                 self.foods.pop(i)
                 self.spawn_food()
@@ -172,131 +229,114 @@ class SnakeGame:
         
         if not food_eaten:
             self.snake.pop()
-    
-    def draw_3d_food(self, x, y, color, food_type):
-        """Draw food with 3D effect and special glow for super/slower food"""
-        pixel_x = x * GRID_SIZE
-        pixel_y = y * GRID_SIZE
-        
-        # Special effects for Super/Slower food
-        if food_type in ['super', 'slower']:
-            # Pulsing glow
-            pulse = (pygame.time.get_ticks() // 150) % 6
-            glow_radius = GRID_SIZE // 2 + pulse
-            s = pygame.Surface((GRID_SIZE * 3, GRID_SIZE * 3), pygame.SRCALPHA)
-            alpha = 120 - pulse * 15
-            pygame.draw.circle(s, (*color, alpha), (GRID_SIZE*1.5, GRID_SIZE*1.5), glow_radius + 4)
-            self.screen.blit(s, (pixel_x - GRID_SIZE, pixel_y - GRID_SIZE))
 
-        # Main food circle
-        pygame.draw.circle(self.screen, color, 
-                         (pixel_x + GRID_SIZE//2, pixel_y + GRID_SIZE//2), 
-                         GRID_SIZE//2 - 2)
-        
-        # Glossy highlight
-        pygame.draw.circle(self.screen, (255, 255, 255), 
-                         (pixel_x + GRID_SIZE//2 - 4, pixel_y + GRID_SIZE//2 - 4), 
-                         GRID_SIZE//6)
-    
+    def draw_snake(self, surface_offset):
+        ox, oy = surface_offset
+        for i, segment in enumerate(self.snake):
+            x = segment[0] * GRID_SIZE + ox
+            y = segment[1] * GRID_SIZE + oy
+            
+            # Tapered size
+            ratio = 1.0 - (i / len(self.snake)) * 0.4
+            radius = int((GRID_SIZE // 2) * ratio)
+            
+            # Color with scales effect
+            color = SNAKE_GREEN if i % 2 == 0 else SNAKE_DARK
+            if self.speed_multiplier < 1.0:
+                color = tuple(max(0, min(255, c + (BLUE[j]-c)*0.4)) for j, c in enumerate(color))
+            
+            # Draw segment
+            pygame.draw.circle(self.screen, color, (x + GRID_SIZE//2, y + GRID_SIZE//2), radius)
+            
+            # Draw scale detail
+            scale_color = tuple(min(255, c + 20) for c in color)
+            pygame.draw.circle(self.screen, scale_color, (x + GRID_SIZE//2, y + GRID_SIZE//2), radius - 4)
+
+            # Head features
+            if i == 0:
+                # Flickering Tongue
+                if (self.frame_count // 5) % 3 == 0:
+                    tx, ty = x + GRID_SIZE//2, y + GRID_SIZE//2
+                    dx, dy = self.direction
+                    pygame.draw.line(self.screen, TONGUE_RED, 
+                                   (tx + dx*radius, ty + dy*radius),
+                                   (tx + dx*(radius+10), ty + dy*(radius+10)), 2)
+                
+                # Eyes
+                eye_color = WHITE
+                eye_radius = 3
+                for side in [-1, 1]:
+                    # Perpendicular vector for eyes
+                    ex = x + GRID_SIZE//2 + (self.direction[0]*5) + (-self.direction[1]*side*5)
+                    ey = y + GRID_SIZE//2 + (self.direction[1]*5) + (self.direction[0]*side*5)
+                    pygame.draw.circle(self.screen, eye_color, (int(ex), int(ey)), eye_radius)
+                    pygame.draw.circle(self.screen, BLACK, (int(ex), int(ey)), 1)
+
     def render(self):
-        """Render the game with enhanced graphics"""
+        # Shake offset
+        ox = random.randint(-self.shake_amount, self.shake_amount) if self.shake_amount > 0 else 0
+        oy = random.randint(-self.shake_amount, self.shake_amount) if self.shake_amount > 0 else 0
+        
         self.screen.fill(BLACK)
         
-        # Draw subtle grid
+        # Grid
         for x in range(0, WINDOW_WIDTH, GRID_SIZE):
-            pygame.draw.line(self.screen, GRID_COLOR, (x, 0), (x, WINDOW_HEIGHT))
+            pygame.draw.line(self.screen, GRID_COLOR, (x+ox, 0), (x+ox, WINDOW_HEIGHT))
         for y in range(0, WINDOW_HEIGHT, GRID_SIZE):
-            pygame.draw.line(self.screen, GRID_COLOR, (0, y), (WINDOW_WIDTH, y))
+            pygame.draw.line(self.screen, GRID_COLOR, (0, y+oy), (WINDOW_WIDTH, y+oy))
 
-        # Draw snake with tapered body
-        snake_len = len(self.snake)
-        for i, segment in enumerate(self.snake):
-            x, y = segment
-            pixel_x = x * GRID_SIZE
-            pixel_y = y * GRID_SIZE
-            
-            # Taper effect: segments get smaller towards tail
-            size_offset = min(i // 2, GRID_SIZE // 3)
-            rect_size = GRID_SIZE - 2 - size_offset
-            offset = (GRID_SIZE - rect_size) // 2
-            
-            color = GREEN if i == 0 else DARK_GREEN
-            if self.speed_multiplier < 1.0: # Blue tint when slowed
-                color = tuple(max(0, min(255, c + (BLUE[j]-c)*0.5)) for j, c in enumerate(color))
-
-            pygame.draw.rect(self.screen, color, 
-                           (pixel_x + offset, pixel_y + offset, rect_size, rect_size), 
-                           border_radius=max(2, 6 - i))
-            
-            # Head eyes
-            if i == 0:
-                eye_color = WHITE
-                eye_size = 3
-                if self.direction == (1, 0): # Right
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 14, pixel_y + 6), eye_size)
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 14, pixel_y + 14), eye_size)
-                elif self.direction == (-1, 0): # Left
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 6, pixel_y + 6), eye_size)
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 6, pixel_y + 14), eye_size)
-                elif self.direction == (0, -1): # Up
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 6, pixel_y + 6), eye_size)
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 14, pixel_y + 6), eye_size)
-                elif self.direction == (0, 1): # Down
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 6, pixel_y + 14), eye_size)
-                    pygame.draw.circle(self.screen, eye_color, (pixel_x + 14, pixel_y + 14), eye_size)
-
-        # Draw food
+        # Food (Breathing effect)
+        breath = math.sin(self.frame_count * 0.2) * 2
         for food in self.foods:
-            self.draw_3d_food(food['pos'][0], food['pos'][1], food['color'], food['type'])
+            fx, fy = food['pos'][0] * GRID_SIZE + ox, food['pos'][1] * GRID_SIZE + oy
+            # Glow for special food
+            if food['type'] in ['super', 'slower']:
+                glow_size = GRID_SIZE + int(breath * 2)
+                s = pygame.Surface((glow_size*2, glow_size*2), pygame.SRCALPHA)
+                pygame.draw.circle(s, (*food['color'], 60), (glow_size, glow_size), glow_size)
+                self.screen.blit(s, (fx + GRID_SIZE//2 - glow_size, fy + GRID_SIZE//2 - glow_size))
+            
+            pygame.draw.circle(self.screen, food['color'], (fx + GRID_SIZE//2, fy + GRID_SIZE//2), GRID_SIZE//2 - 2 + int(breath))
+
+        # Snake
+        self.draw_snake((ox, oy))
         
+        # Particles
+        for p in self.particles:
+            alpha = int(p.lifetime * 255)
+            s = pygame.Surface((p.size, p.size))
+            s.set_alpha(alpha)
+            s.fill(p.color)
+            self.screen.blit(s, (p.x + ox, p.y + oy))
+
         # UI
-        score_bg = pygame.Surface((160, 45), pygame.SRCALPHA)
-        pygame.draw.rect(score_bg, (40, 40, 50, 180), score_bg.get_rect(), border_radius=10)
-        self.screen.blit(score_bg, (10, 10))
-        
         score_text = self.font.render(f"Score: {self.score}", True, WHITE)
-        self.screen.blit(score_text, (25, 18))
-        
+        self.screen.blit(score_text, (20, 20))
         if self.speed_multiplier < 1.0:
-            slow_text = self.small_font.render("SLOWED", True, SLOWER_FOOD_COLOR)
-            self.screen.blit(slow_text, (25, 60))
-        
+            pygame.draw.rect(self.screen, BLUE, (20, 55, 100, 5), border_radius=2)
+            
         if self.game_over:
             overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 180))
             self.screen.blit(overlay, (0,0))
-            go_text = self.font.render("GAME OVER", True, RED)
-            re_text = self.small_font.render("Press R to Restart", True, WHITE)
-            self.screen.blit(go_text, go_text.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2 - 20)))
-            self.screen.blit(re_text, re_text.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2 + 30)))
-        
+            txt = self.font.render("WASTED", True, RED)
+            self.screen.blit(txt, txt.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2)))
+            
         pygame.display.flip()
-    
+
     def run(self):
-        """Main game loop"""
-        print("Snake Game: WASD/Arrows to move, R to restart, ESC to quit")
-        
         running = True
         while running:
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_r:
-                        self.reset_game()
-                    elif event.key == pygame.K_ESCAPE:
-                        running = False
+                if event.type == pygame.QUIT: running = False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_r: self.reset_game()
+                if event.key == pygame.K_ESCAPE if hasattr(event, 'key') else False: running = False
             
             self.handle_input()
             self.update()
             self.render()
-            
-            # Clock tick uses current speed multiplier
             self.clock.tick(int(self.base_speed * self.speed_multiplier))
-        
         pygame.quit()
-        sys.exit()
 
 if __name__ == "__main__":
-    game = SnakeGame()
-    game.run()
+    SnakeGame().run()
